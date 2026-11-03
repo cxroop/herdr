@@ -1230,3 +1230,133 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
     assert!(outside.repaint);
     assert!(state.overlay.is_none());
 }
+
+#[test]
+fn invert_scroll_routes_host_reports_to_scrollback_and_full_screen_apps() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let guard = rt.enter();
+    for invert_scroll in [false, true] {
+        for encoding in ["sgr", "x10", "pixel"] {
+            for mode in ["scrollback", "mouse", "alternate"] {
+                for reported_up in [false, true] {
+                    let mut config = Config::default();
+                    config.ui.invert_scroll = invert_scroll;
+                    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+                    state.set_snapshot(Box::new(snapshot()));
+                    state.set_pane_surface(surface());
+                    state.compose(106, 20).unwrap();
+                    let pane = &state.hits.panes[0];
+                    let (column, row) = (pane.inner_rect.x + 1, pane.inner_rect.y);
+                    let cb = if reported_up { 72 } else { 73 }; // Alt + vertical wheel
+                    let outcome = match encoding {
+                        "sgr" => state.handle_input_bytes(
+                            format!("\x1b[<{cb};{};{}M", column + 1, row + 1).as_bytes(),
+                        ),
+                        "x10" => state.handle_input_bytes(&[
+                            0x1b,
+                            b'[',
+                            b'M',
+                            cb + 32,
+                            column as u8 + 33,
+                            row as u8 + 33,
+                        ]),
+                        "pixel" => state.handle_pixel_mouse(
+                            format!("\x1b[<{cb};{};{}M", column * 10 + 1, row * 20 + 1).as_bytes(),
+                            crate::input::mouse::HostGeometry::new(106, 20, 1060, 400).unwrap(),
+                        ),
+                        _ => unreachable!(),
+                    };
+                    let [ClientMessage::ClientShellPaneInput { events, .. }] =
+                        &outcome.requests[..]
+                    else {
+                        panic!("expected pane wheel: {encoding}, {mode}");
+                    };
+                    let up = reported_up ^ invert_scroll;
+                    assert!(matches!(&events[..], [ClientPaneInputEvent::Mouse {
+                        kind,
+                        position: ClientMousePosition::Cell { column: 1, row: 0 },
+                        modifiers,
+                        lines: 3,
+                        ..
+                    }] if *kind == if up { crate::protocol::ClientMouseKind::ScrollUp } else { crate::protocol::ClientMouseKind::ScrollDown }
+                        && *modifiers == KeyModifiers::ALT.bits()));
+
+                    let mut output = (0..80).map(|i| format!("line {i}\r\n")).collect::<String>();
+                    match mode {
+                        "mouse" => output.push_str("\x1b[?1049h\x1b[?1000h\x1b[?1006h"),
+                        "alternate" => output.push_str("\x1b[?1049h\x1b[?1007h"),
+                        _ => {}
+                    }
+                    let (runtime, mut input_rx) =
+                        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                            20,
+                            5,
+                            4096,
+                            output.as_bytes(),
+                            4,
+                        );
+                    if mode == "scrollback" {
+                        runtime.scroll_up(9);
+                    }
+                    crate::server::pane_input::test_apply_client_pane_input_events(
+                        &runtime, events,
+                    )
+                    .unwrap();
+                    match mode {
+                        "scrollback" => {
+                            assert_eq!(
+                                runtime.scroll_metrics().unwrap().offset_from_bottom,
+                                if up { 12 } else { 6 }
+                            );
+                            assert!(input_rx.try_recv().is_err());
+                        }
+                        "mouse" => assert_eq!(
+                            input_rx.try_recv().unwrap().as_ref(),
+                            if up {
+                                &b"\x1b[<72;2;1M"[..]
+                            } else {
+                                &b"\x1b[<73;2;1M"[..]
+                            }
+                        ),
+                        "alternate" => assert_eq!(
+                            input_rx.try_recv().unwrap().as_ref(),
+                            if up { &b"\x1b[A"[..] } else { &b"\x1b[B"[..] }
+                        ),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+    drop(guard);
+    rt.shutdown_timeout(std::time::Duration::from_millis(100));
+}
+
+#[test]
+fn invert_scroll_applies_to_sidebar_and_changes_on_reload() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).unwrap();
+    let mouse = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: state.hits.agent_body.x,
+        row: state.hits.agent_body.y,
+        modifiers: KeyModifiers::empty(),
+    };
+    let mut next = Config::default();
+    next.ui.invert_scroll = true;
+    state.config.apply_live_config(&next, &[], &[]);
+    state.agent_scroll = 2;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert_eq!(state.agent_scroll, 1);
+    state.config.apply_live_config(&Config::default(), &[], &[]);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        ..mouse
+    })]);
+    assert_eq!(state.agent_scroll, 0);
+}

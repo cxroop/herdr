@@ -280,6 +280,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Pane scrollback lines to scroll per mouse wheel notch.
 # mouse_scroll_lines = 3
+# Reverse vertical wheel/trackpad reports if they differ from host scrollback.
+# invert_scroll = false
 
 # Ask for confirmation before closing a workspace
 # confirm_close = true

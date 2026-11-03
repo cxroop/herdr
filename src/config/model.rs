@@ -960,6 +960,8 @@ pub struct UiConfig {
     pub redraw_on_focus_gained: bool,
     /// Lines to scroll per mouse wheel notch. Default: 3.
     pub mouse_scroll_lines: Option<NonZeroUsize>,
+    /// Reverse vertical mouse wheel/trackpad reports from the host. Default: false.
+    pub invert_scroll: bool,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
@@ -1210,6 +1212,7 @@ impl Default for UiConfig {
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
+            invert_scroll: false,
             confirm_close: true,
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
@@ -1732,6 +1735,19 @@ sidebar_collapsed_mode = "hidden"
         assert_eq!(validated_sidebar_bounds(0, u16::MAX), Some((0, u16::MAX)));
         assert_eq!(validated_sidebar_bounds(50, 30), None);
         assert_eq!(validated_sidebar_bounds(u16::MAX, 0), None);
+    }
+
+    #[test]
+    fn invert_scroll_is_opt_in_and_requires_a_boolean() {
+        assert!(!Config::default().ui.invert_scroll);
+        assert!(!toml::from_str::<Config>("[ui]\n").unwrap().ui.invert_scroll);
+        assert!(
+            toml::from_str::<Config>("[ui]\ninvert_scroll = true\n")
+                .unwrap()
+                .ui
+                .invert_scroll
+        );
+        assert!(toml::from_str::<Config>("[ui]\ninvert_scroll = 'true'\n").is_err());
     }
 
     #[test]

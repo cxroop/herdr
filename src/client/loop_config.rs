@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct ClientLoopConfig {
     pub(super) sound_config: crate::config::SoundConfig,
     pub(super) mouse_scroll_lines: usize,
+    pub(super) invert_scroll: bool,
     pub(super) redraw_on_focus_gained: bool,
     pub(super) host_cursor: crate::config::HostCursorModeConfig,
     pub(super) kitty_graphics_enabled: bool,

@@ -1,3 +1,17 @@
+/// Compensate for hosts that report vertical wheel events opposite to scrollback.
+/// Apply once at the client boundary, before UI routing or forwarding to a pane.
+pub(crate) fn normalize_scroll_direction(
+    kind: crossterm::event::MouseEventKind,
+    invert_scroll: bool,
+) -> crossterm::event::MouseEventKind {
+    use crossterm::event::MouseEventKind;
+    match (invert_scroll, kind) {
+        (true, MouseEventKind::ScrollUp) => MouseEventKind::ScrollDown,
+        (true, MouseEventKind::ScrollDown) => MouseEventKind::ScrollUp,
+        (_, kind) => kind,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Position {
     Cell { column: u16, row: u16 },
@@ -150,6 +164,21 @@ fn scale(pixel: u32, source: u32, target: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invert_scroll_keeps_horizontal_motion_and_buttons() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        for kind in [
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+        ] {
+            assert_eq!(normalize_scroll_direction(kind, true), kind);
+        }
+    }
 
     #[test]
     fn integer_cell_pitch_ignores_trailing_pixel_remainder() {

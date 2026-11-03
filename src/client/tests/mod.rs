@@ -772,7 +772,7 @@ fn reload_local_client_config_refreshes_local_client_presentation_state() {
     ));
     std::fs::write(
         &path,
-        "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\nmouse_capture = false\n",
+        "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\nmouse_capture = false\ninvert_scroll = true\n",
     )
     .unwrap();
     let path_string = path.to_string_lossy().to_string();
@@ -782,6 +782,7 @@ fn reload_local_client_config_refreshes_local_client_presentation_state() {
     let mut draw_host_cursor = false;
     let mut remote_image_paste_key = None;
     let mut mouse_capture = true;
+    let mut invert_scroll = false;
 
     reload_local_client_config(
         &mut sound_config,
@@ -789,11 +790,13 @@ fn reload_local_client_config_refreshes_local_client_presentation_state() {
         &mut draw_host_cursor,
         &mut remote_image_paste_key,
         &mut mouse_capture,
+        &mut invert_scroll,
     );
 
     assert!(!redraw_on_focus_gained);
     assert!(draw_host_cursor);
     assert!(!mouse_capture);
+    assert!(invert_scroll);
     let _ = std::fs::remove_file(path);
 }
 
@@ -816,6 +819,7 @@ fn reload_local_client_config_keeps_ui_preferences_when_ui_is_invalid() {
     let mut draw_host_cursor = true;
     let mut remote_image_paste_key = None;
     let mut mouse_capture = false;
+    let mut invert_scroll = true;
 
     reload_local_client_config(
         &mut sound_config,
@@ -823,9 +827,11 @@ fn reload_local_client_config_keeps_ui_preferences_when_ui_is_invalid() {
         &mut draw_host_cursor,
         &mut remote_image_paste_key,
         &mut mouse_capture,
+        &mut invert_scroll,
     );
 
     assert!(!mouse_capture);
+    assert!(invert_scroll);
     assert!(!redraw_on_focus_gained);
     assert!(draw_host_cursor);
     let _ = std::fs::remove_file(path);

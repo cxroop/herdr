@@ -59,6 +59,7 @@ impl AttachEscapeState {
         data: Vec<u8>,
         viewport_rows: u16,
         mouse_scroll_lines: usize,
+        invert_scroll: bool,
     ) -> AttachInputAction {
         const PREFIX: u8 = 0x02; // Ctrl+B
 
@@ -89,7 +90,8 @@ impl AttachEscapeState {
                 if is_prefix {
                     return AttachInputAction::Forward(data);
                 }
-                if let Some(action) = attach_scroll_action(&data, viewport_rows, mouse_scroll_lines)
+                if let Some(action) =
+                    attach_scroll_action(&data, viewport_rows, mouse_scroll_lines, invert_scroll)
                 {
                     return AttachInputAction::ForwardThenSemantic(prefix, action);
                 }
@@ -103,7 +105,9 @@ impl AttachEscapeState {
             }
         }
 
-        if let Some(action) = attach_scroll_action(&data, viewport_rows, mouse_scroll_lines) {
+        if let Some(action) =
+            attach_scroll_action(&data, viewport_rows, mouse_scroll_lines, invert_scroll)
+        {
             return if let Some(prefix) = self.pending_prefix.take() {
                 AttachInputAction::ForwardThenSemantic(prefix, action)
             } else {
@@ -137,7 +141,7 @@ impl AttachEscapeState {
         if output.is_empty() {
             AttachInputAction::None
         } else if let Some(action) =
-            attach_scroll_action(&output, viewport_rows, mouse_scroll_lines)
+            attach_scroll_action(&output, viewport_rows, mouse_scroll_lines, invert_scroll)
         {
             AttachInputAction::Semantic(action)
         } else {
@@ -167,6 +171,7 @@ fn single_attach_key(data: &[u8]) -> Option<crate::input::TerminalKey> {
 pub(super) fn direct_attach_pixel_mouse(
     data: &[u8],
     geometry: crate::input::mouse::HostGeometry,
+    invert_scroll: bool,
 ) -> Option<(
     crate::protocol::ClientMouseKind,
     crate::protocol::ClientMousePosition,
@@ -176,7 +181,9 @@ pub(super) fn direct_attach_pixel_mouse(
     let (column, row) = geometry.cell(report.x, report.y)?;
     let mouse = report.at_cell(column, row);
     Some((
-        crate::protocol::ClientMouseKind::from_crossterm(mouse.kind)?,
+        crate::protocol::ClientMouseKind::from_crossterm(
+            crate::input::mouse::normalize_scroll_direction(mouse.kind, invert_scroll),
+        )?,
         crate::protocol::ClientMousePosition::Pixels {
             x: report.x,
             y: report.y,
@@ -192,6 +199,7 @@ fn attach_scroll_action(
     data: &[u8],
     viewport_rows: u16,
     mouse_scroll_lines: usize,
+    invert_scroll: bool,
 ) -> Option<AttachSemanticAction> {
     let mut events = crate::raw_input::parse_framed_input(data);
     if events.len() != 1 {
@@ -199,31 +207,33 @@ fn attach_scroll_action(
     }
 
     match events.pop()? {
-        crate::raw_input::RawInputEvent::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let direction = if mouse.kind == MouseEventKind::ScrollUp {
-                    AttachScrollDirection::Up
-                } else {
-                    AttachScrollDirection::Down
-                };
-                Some(AttachSemanticAction::Scroll {
-                    source: AttachScrollSource::Wheel,
-                    direction,
-                    lines: mouse_scroll_lines.max(1).min(u16::MAX as usize) as u16,
-                    column: Some(mouse.column),
-                    row: Some(mouse.row),
+        crate::raw_input::RawInputEvent::Mouse(mouse) => {
+            match crate::input::mouse::normalize_scroll_direction(mouse.kind, invert_scroll) {
+                kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
+                    let direction = if kind == MouseEventKind::ScrollUp {
+                        AttachScrollDirection::Up
+                    } else {
+                        AttachScrollDirection::Down
+                    };
+                    Some(AttachSemanticAction::Scroll {
+                        source: AttachScrollSource::Wheel,
+                        direction,
+                        lines: mouse_scroll_lines.max(1).min(u16::MAX as usize) as u16,
+                        column: Some(mouse.column),
+                        row: Some(mouse.row),
+                        modifiers: mouse.modifiers.bits(),
+                    })
+                }
+                kind => Some(AttachSemanticAction::Mouse {
+                    kind: crate::protocol::ClientMouseKind::from_crossterm(kind)?,
+                    position: crate::protocol::ClientMousePosition::Cell {
+                        column: mouse.column,
+                        row: mouse.row,
+                    },
                     modifiers: mouse.modifiers.bits(),
-                })
+                }),
             }
-            kind => Some(AttachSemanticAction::Mouse {
-                kind: crate::protocol::ClientMouseKind::from_crossterm(kind)?,
-                position: crate::protocol::ClientMousePosition::Cell {
-                    column: mouse.column,
-                    row: mouse.row,
-                },
-                modifiers: mouse.modifiers.bits(),
-            }),
-        },
+        }
         crate::raw_input::RawInputEvent::Key(key)
             if key.modifiers.is_empty()
                 && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
@@ -302,11 +312,11 @@ mod tests {
     fn attach_escape_detaches_on_prefix_q() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(vec![0x02], 24, 3),
+            escape.filter_input(vec![0x02], 24, 3, false),
             AttachInputAction::None
         ));
         assert!(matches!(
-            escape.filter_input(vec![b'q'], 24, 3),
+            escape.filter_input(vec![b'q'], 24, 3, false),
             AttachInputAction::Detach
         ));
     }
@@ -316,10 +326,10 @@ mod tests {
     fn attach_escape_sends_literal_prefix_on_double_prefix() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(vec![0x02], 24, 3),
+            escape.filter_input(vec![0x02], 24, 3, false),
             AttachInputAction::None
         ));
-        match escape.filter_input(vec![0x02], 24, 3) {
+        match escape.filter_input(vec![0x02], 24, 3, false) {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, vec![0x02]),
             other => panic!("expected forwarded prefix, got {other:?}"),
         }
@@ -330,15 +340,15 @@ mod tests {
     fn attach_escape_detaches_on_kitty_encoded_prefix_q() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(b"\x1b[98;5u".to_vec(), 24, 3),
+            escape.filter_input(b"\x1b[98;5u".to_vec(), 24, 3, false),
             AttachInputAction::None
         ));
         assert!(matches!(
-            escape.filter_input(b"\x1b[98;5:3u".to_vec(), 24, 3),
+            escape.filter_input(b"\x1b[98;5:3u".to_vec(), 24, 3, false),
             AttachInputAction::None
         ));
         assert!(matches!(
-            escape.filter_input(b"\x1b[113u".to_vec(), 24, 3),
+            escape.filter_input(b"\x1b[113u".to_vec(), 24, 3, false),
             AttachInputAction::Detach
         ));
     }
@@ -348,11 +358,11 @@ mod tests {
     fn attach_escape_detaches_on_modify_other_keys_encoded_prefix() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(b"\x1b[27;5;98~".to_vec(), 24, 3),
+            escape.filter_input(b"\x1b[27;5;98~".to_vec(), 24, 3, false),
             AttachInputAction::None
         ));
         assert!(matches!(
-            escape.filter_input(b"q".to_vec(), 24, 3),
+            escape.filter_input(b"q".to_vec(), 24, 3, false),
             AttachInputAction::Detach
         ));
     }
@@ -362,14 +372,14 @@ mod tests {
     fn attach_escape_forwards_kitty_encoded_literal_prefix() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(b"\x1b[98;5u".to_vec(), 24, 3),
+            escape.filter_input(b"\x1b[98;5u".to_vec(), 24, 3, false),
             AttachInputAction::None
         ));
         assert!(matches!(
-            escape.filter_input(b"\x1b[98;5:3u".to_vec(), 24, 3),
+            escape.filter_input(b"\x1b[98;5:3u".to_vec(), 24, 3, false),
             AttachInputAction::None
         ));
-        match escape.filter_input(b"\x1b[98;5u".to_vec(), 24, 3) {
+        match escape.filter_input(b"\x1b[98;5u".to_vec(), 24, 3, false) {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, b"\x1b[98;5u"),
             other => panic!("expected Kitty-encoded prefix, got {other:?}"),
         }
@@ -381,7 +391,7 @@ mod tests {
         let mut escape = AttachEscapeState::default();
         let paste = b"\x1b[200~one\x02q\ntwo\x1b[201~".to_vec();
 
-        match escape.filter_input(paste.clone(), 24, 3) {
+        match escape.filter_input(paste.clone(), 24, 3, false) {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, paste),
             other => panic!("expected opaque paste, got {other:?}"),
         }
@@ -393,17 +403,17 @@ mod tests {
         let mut escape = AttachEscapeState::default();
         let paste = b"\x1b[200~one\ntwo\x1b[201~".to_vec();
         assert!(matches!(
-            escape.filter_input(vec![0x02], 24, 3),
+            escape.filter_input(vec![0x02], 24, 3, false),
             AttachInputAction::None
         ));
 
         assert!(matches!(
-            escape.filter_input(paste.clone(), 24, 3),
+            escape.filter_input(paste.clone(), 24, 3, false),
             AttachInputAction::ForwardPair(prefix, bytes)
                 if prefix == vec![0x02] && bytes == paste
         ));
         assert!(matches!(
-            escape.filter_input(vec![b'q'], 24, 3),
+            escape.filter_input(vec![b'q'], 24, 3, false),
             AttachInputAction::Forward(bytes) if bytes == b"q"
         ));
     }
@@ -413,10 +423,10 @@ mod tests {
     fn attach_escape_forwards_prefix_before_non_escape_key() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(vec![b'a', 0x02], 24, 3),
+            escape.filter_input(vec![b'a', 0x02], 24, 3, false),
             AttachInputAction::Forward(bytes) if bytes == b"a"
         ));
-        match escape.filter_input(vec![b'x'], 24, 3) {
+        match escape.filter_input(vec![b'x'], 24, 3, false) {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, vec![0x02, b'x']),
             other => panic!("expected forwarded bytes, got {other:?}"),
         }
@@ -424,9 +434,96 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn attach_invert_scroll_changes_wheels_but_preserves_page_keys_and_paste() {
+        for invert_scroll in [false, true] {
+            let mut escape = AttachEscapeState::default();
+            for (bytes, up) in [
+                (&b"\x1b[<72;11;6M"[..], true),
+                (&b"\x1b[<73;11;6M"[..], false),
+                (&b"\x1b[Mh+&"[..], true),
+                (&b"\x1b[Mi+&"[..], false),
+            ] {
+                let action = escape.filter_input(bytes.to_vec(), 24, 7, invert_scroll);
+                let AttachInputAction::Semantic(AttachSemanticAction::Scroll {
+                    source,
+                    direction,
+                    lines,
+                    column,
+                    row,
+                    modifiers,
+                }) = action
+                else {
+                    panic!("expected wheel action, got {action:?}");
+                };
+                assert_eq!(source, AttachScrollSource::Wheel);
+                assert_eq!(
+                    direction,
+                    if up ^ invert_scroll {
+                        AttachScrollDirection::Up
+                    } else {
+                        AttachScrollDirection::Down
+                    }
+                );
+                assert_eq!(
+                    (lines, column, row, modifiers),
+                    (7, Some(10), Some(5), KeyModifiers::ALT.bits())
+                );
+            }
+            for (bytes, direction) in [
+                (&b"\x1b[5~"[..], AttachScrollDirection::Up),
+                (&b"\x1b[6~"[..], AttachScrollDirection::Down),
+            ] {
+                assert!(matches!(
+                    escape.filter_input(bytes.to_vec(), 24, 7, invert_scroll),
+                    AttachInputAction::Semantic(AttachSemanticAction::Scroll {
+                        source: AttachScrollSource::PageKey { .. },
+                        direction: actual, lines: 23, ..
+                    }) if actual == direction
+                ));
+            }
+            let paste = b"\x1b[200~\x1b[<64;11;6M\x1b[201~".to_vec();
+            assert!(matches!(
+                escape.filter_input(paste.clone(), 24, 7, invert_scroll),
+                AttachInputAction::Forward(bytes) if bytes == paste
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_invert_scroll_preserves_pixel_coordinates_and_pending_prefix() {
+        let geometry = crate::input::mouse::HostGeometry::new(80, 24, 800, 480).unwrap();
+        let (kind, position, modifiers) =
+            direct_attach_pixel_mouse(b"\x1b[<72;21;22M", geometry, true).unwrap();
+        assert_eq!(kind, crate::protocol::ClientMouseKind::ScrollDown);
+        assert_eq!(
+            position,
+            crate::protocol::ClientMousePosition::Pixels {
+                x: 21,
+                y: 22,
+                column: 2,
+                row: 1,
+            }
+        );
+        assert_eq!(modifiers, KeyModifiers::ALT.bits());
+        let mut escape = AttachEscapeState::default();
+        assert!(matches!(
+            escape.filter_input(vec![0x02], 24, 3, true),
+            AttachInputAction::None
+        ));
+        assert!(matches!(
+            escape.filter_input(b"\x1b[<65;11;6M".to_vec(), 24, 3, true),
+            AttachInputAction::ForwardThenSemantic(prefix, AttachSemanticAction::Scroll {
+                source: AttachScrollSource::Wheel, direction: AttachScrollDirection::Up, ..
+            }) if prefix == [0x02]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn attach_escape_turns_wheel_into_scroll_action() {
         let mut escape = AttachEscapeState::default();
-        match escape.filter_input(b"\x1b[<64;11;6M".to_vec(), 24, 7) {
+        match escape.filter_input(b"\x1b[<64;11;6M".to_vec(), 24, 7, false) {
             AttachInputAction::Semantic(AttachSemanticAction::Scroll {
                 source,
                 direction,
@@ -450,7 +547,7 @@ mod tests {
     fn attach_escape_routes_non_wheel_mouse_reports_semantically() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(b"\x1b[<0;11;6M".to_vec(), 24, 7),
+            escape.filter_input(b"\x1b[<0;11;6M".to_vec(), 24, 7, false),
             AttachInputAction::Semantic(AttachSemanticAction::Mouse {
                 kind: crate::protocol::ClientMouseKind::Down(
                     crate::protocol::ClientMouseButton::Left
@@ -466,12 +563,12 @@ mod tests {
     fn attach_escape_flushes_pending_prefix_before_cell_mouse() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(vec![0x02], 24, 3),
+            escape.filter_input(vec![0x02], 24, 3, false),
             AttachInputAction::None
         ));
 
         assert!(matches!(
-            escape.filter_input(b"\x1b[<0;11;6M".to_vec(), 24, 7),
+            escape.filter_input(b"\x1b[<0;11;6M".to_vec(), 24, 7, false),
             AttachInputAction::ForwardThenSemantic(
                 prefix,
                 AttachSemanticAction::Mouse {
@@ -493,7 +590,7 @@ mod tests {
     fn direct_attach_pixel_mouse_keeps_pixels_and_semantic_kind() {
         let geometry = crate::input::mouse::HostGeometry::new(80, 24, 800, 480).unwrap();
         let (kind, position, modifiers) =
-            direct_attach_pixel_mouse(b"\x1b[<0;21;22M", geometry).expect("pixel mouse");
+            direct_attach_pixel_mouse(b"\x1b[<0;21;22M", geometry, false).expect("pixel mouse");
 
         assert_eq!(
             kind,
@@ -516,7 +613,7 @@ mod tests {
     fn pixel_mouse_flushes_pending_attach_prefix() {
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
-            escape.filter_input(vec![0x02], 24, 3),
+            escape.filter_input(vec![0x02], 24, 3, false),
             AttachInputAction::None
         ));
 
@@ -528,7 +625,7 @@ mod tests {
     #[test]
     fn attach_escape_turns_plain_page_keys_into_scroll_actions() {
         let mut escape = AttachEscapeState::default();
-        match escape.filter_input(b"\x1b[5~".to_vec(), 12, 3) {
+        match escape.filter_input(b"\x1b[5~".to_vec(), 12, 3, false) {
             AttachInputAction::Semantic(AttachSemanticAction::Scroll {
                 source,
                 direction,
@@ -547,7 +644,7 @@ mod tests {
             other => panic!("expected page-up scroll action, got {other:?}"),
         }
 
-        match escape.filter_input(b"\x1b[6~".to_vec(), 12, 3) {
+        match escape.filter_input(b"\x1b[6~".to_vec(), 12, 3, false) {
             AttachInputAction::Semantic(AttachSemanticAction::Scroll {
                 source,
                 direction,
@@ -571,7 +668,7 @@ mod tests {
     #[test]
     fn attach_escape_forwards_modified_page_key() {
         let mut escape = AttachEscapeState::default();
-        match escape.filter_input(b"\x1b[5;5~".to_vec(), 12, 3) {
+        match escape.filter_input(b"\x1b[5;5~".to_vec(), 12, 3, false) {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, b"\x1b[5;5~"),
             other => panic!("expected modified page key to forward, got {other:?}"),
         }

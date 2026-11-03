@@ -215,6 +215,7 @@ fn run_client_with_mode(
     let mut loop_config = ClientLoopConfig {
         sound_config: loaded_config.config.ui.sound,
         mouse_scroll_lines,
+        invert_scroll: loaded_config.config.ui.invert_scroll,
         redraw_on_focus_gained,
         host_cursor,
         kitty_graphics_enabled,
@@ -462,6 +463,7 @@ async fn run_client_loop(
         host_theme_updates: Vec::new(),
         direct_mouse_capture_preference: attach_escape.is_some() && config.mouse_capture_active,
         shell_mouse_capture_preference: config.mouse_capture_active,
+        invert_scroll: config.invert_scroll,
         direct_keyboard_protocol: crate::terminal_modes::DirectHostKeyboardState::default(),
         pane_keyboard_report_all: false,
         keyboard_report_all_active: false,
@@ -949,6 +951,7 @@ async fn run_client_loop(
                         data,
                         state.reported_size.1,
                         state.mouse_scroll_lines,
+                        state.invert_scroll,
                     ) {
                         AttachInputAction::Forward(data) => data,
                         AttachInputAction::ForwardPair(first, second) => {
@@ -1147,7 +1150,7 @@ async fn run_client_loop(
                         }
                     }
                     if let Some((kind, position, modifiers)) =
-                        direct_attach_pixel_mouse(&data, geometry)
+                        direct_attach_pixel_mouse(&data, geometry, state.invert_scroll)
                     {
                         let message = ClientMessage::AttachMouse {
                             kind,

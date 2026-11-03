@@ -947,6 +947,12 @@
           "description": "Lines to scroll per mouse wheel notch."
         },
         {
+          "key": "ui.invert_scroll",
+          "type": "boolean",
+          "default": "false",
+          "description": "Reverse vertical mouse wheel and trackpad reports when their direction differs from the host terminal's own scrollback (for example, WindTerm on macOS). Applies to the local client's UI, panes, and direct terminal attach, including remote endpoints. Does not change horizontal scrolling, keyboard scrolling, or scrollbar dragging. Reload the client configuration or reattach after changing it; this does not detect macOS natural scrolling automatically."
+        },
+        {
           "key": "ui.confirm_close",
           "type": "boolean",
           "default": "true",
